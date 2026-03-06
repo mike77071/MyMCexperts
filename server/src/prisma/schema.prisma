@@ -1,0 +1,90 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  CASE_MANAGER
+  BILLER
+  VIEWER
+}
+
+enum ContractStatus {
+  PENDING
+  PROCESSING_TEXT
+  PROCESSING_OCR
+  PROCESSING_AI
+  COMPLETE
+  ERROR
+}
+
+model User {
+  id               String           @id @default(cuid())
+  email            String           @unique
+  passwordHash     String
+  name             String
+  role             Role             @default(VIEWER)
+  isActive         Boolean          @default(true)
+  lastLoginAt      DateTime?
+  createdAt        DateTime         @default(now())
+  facilities       UserFacility[]
+  createdContracts Contract[]       @relation("CreatedBy")
+  reviewedMatrices ContractMatrix[] @relation("ReviewedBy")
+}
+
+model Facility {
+  id        String         @id @default(cuid())
+  name      String
+  address   String
+  city      String
+  state     String
+  zip       String
+  npi       String?
+  phone     String?
+  createdAt DateTime       @default(now())
+  users     UserFacility[]
+  contracts Contract[]
+}
+
+model UserFacility {
+  userId     String
+  facilityId String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  facility   Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+
+  @@id([userId, facilityId])
+}
+
+model Contract {
+  id             String         @id @default(cuid())
+  facilityId     String
+  payerName      String
+  payerType      String
+  effectiveDate  DateTime?
+  expirationDate DateTime?
+  filePath       String
+  status         ContractStatus @default(PENDING)
+  errorMessage   String?
+  createdById    String
+  createdAt      DateTime       @default(now())
+  facility       Facility       @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  createdBy      User           @relation("CreatedBy", fields: [createdById], references: [id])
+  matrix         ContractMatrix?
+}
+
+model ContractMatrix {
+  id           String    @id @default(cuid())
+  contractId   String    @unique
+  data         Json
+  extractedAt  DateTime  @default(now())
+  reviewedById String?
+  reviewedAt   DateTime?
+  contract     Contract  @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  reviewedBy   User?     @relation("ReviewedBy", fields: [reviewedById], references: [id])
+}
