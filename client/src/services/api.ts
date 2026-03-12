@@ -79,6 +79,23 @@ export const getContractMatrix = (contractId: string) =>
 export const getExportUrl = (contractId: string) =>
   `${import.meta.env.VITE_API_URL ?? '/api'}/contracts/${contractId}/export`;
 
+export const batchUploadContracts = (
+  facilityId: string,
+  formData: FormData
+) =>
+  api.post(`/contracts/facilities/${facilityId}/batch`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+
+export const reprocessContract = (contractId: string) =>
+  api.post(`/contracts/${contractId}/reprocess`);
+
+export const reprocessAllFailed = (facilityId: string) =>
+  api.post(`/contracts/facilities/${facilityId}/reprocess-all`);
+
+export const getQueueStatus = () =>
+  api.get('/contracts/queue/status');
+
 export const deleteContract = (contractId: string) =>
   api.delete(`/contracts/${contractId}`);
 

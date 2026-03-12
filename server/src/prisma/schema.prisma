@@ -62,20 +62,22 @@ model UserFacility {
 }
 
 model Contract {
-  id             String         @id @default(cuid())
-  facilityId     String
-  payerName      String
-  payerType      String
-  effectiveDate  DateTime?
-  expirationDate DateTime?
-  filePath       String
-  status         ContractStatus @default(PENDING)
-  errorMessage   String?
-  createdById    String
-  createdAt      DateTime       @default(now())
-  facility       Facility       @relation(fields: [facilityId], references: [id], onDelete: Cascade)
-  createdBy      User           @relation("CreatedBy", fields: [createdById], references: [id])
-  matrix         ContractMatrix?
+  id               String         @id @default(cuid())
+  facilityId       String
+  payerName        String
+  payerType        String
+  effectiveDate    DateTime?
+  expirationDate   DateTime?
+  filePath         String
+  originalFilename String         @default("")
+  status           ContractStatus @default(PENDING)
+  errorMessage     String?
+  retryCount       Int            @default(0)
+  createdById      String
+  createdAt        DateTime       @default(now())
+  facility         Facility       @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  createdBy        User           @relation("CreatedBy", fields: [createdById], references: [id])
+  matrix           ContractMatrix?
 }
 
 model ContractMatrix {

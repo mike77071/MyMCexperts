@@ -1,6 +1,13 @@
-import { useEffect, useState, useRef, FormEvent } from 'react';
+import { useEffect, useState, useRef, FormEvent, Fragment } from 'react';
 import { Link } from 'react-router-dom';
-import { getContracts, deleteContract, getFacilities, uploadContract } from '../services/api';
+import {
+  getContracts,
+  deleteContract,
+  getFacilities,
+  uploadContract,
+  reprocessContract,
+  reprocessAllFailed,
+} from '../services/api';
 import { ContractStatus, Facility } from '../types';
 import { useAuth } from '../hooks/useAuth';
 
@@ -10,6 +17,8 @@ interface ContractRow {
   payerType: string;
   status: ContractStatus;
   errorMessage: string | null;
+  originalFilename?: string;
+  retryCount?: number;
   effectiveDate: string | null;
   expirationDate: string | null;
   createdAt: string;
@@ -19,18 +28,18 @@ interface ContractRow {
 }
 
 const STATUS_BADGE: Record<ContractStatus, { label: string; className: string }> = {
-  PENDING:         { label: 'Queued',      className: 'bg-gray-100 text-gray-600' },
-  PROCESSING_TEXT: { label: 'Reading PDF', className: 'bg-blue-100 text-blue-700' },
-  PROCESSING_OCR:  { label: 'OCR',         className: 'bg-blue-100 text-blue-700' },
-  PROCESSING_AI:   { label: 'AI Extract',  className: 'bg-purple-100 text-purple-700' },
-  COMPLETE:        { label: 'Complete',    className: 'bg-green-100 text-green-700' },
-  ERROR:           { label: 'Error',       className: 'bg-red-100 text-red-700' },
+  PENDING:         { label: 'Queued',       className: 'bg-gray-100 text-gray-600' },
+  PROCESSING_TEXT: { label: 'Reading PDF',  className: 'bg-blue-100 text-blue-700' },
+  PROCESSING_OCR:  { label: 'Running OCR',  className: 'bg-blue-100 text-blue-700' },
+  PROCESSING_AI:   { label: 'AI Extract',   className: 'bg-purple-100 text-purple-700' },
+  COMPLETE:        { label: 'Complete',     className: 'bg-green-100 text-green-700' },
+  ERROR:           { label: 'Error',        className: 'bg-red-100 text-red-700' },
 };
 
 const STATUS_LABELS: [ContractStatus, string][] = [
   ['PENDING', 'Queued'],
   ['PROCESSING_TEXT', 'Reading PDF'],
-  ['PROCESSING_OCR', 'OCR'],
+  ['PROCESSING_OCR', 'Running OCR'],
   ['PROCESSING_AI', 'AI Extract'],
   ['COMPLETE', 'Complete'],
   ['ERROR', 'Error'],
@@ -42,6 +51,97 @@ type SortCol = 'payerName' | 'status' | 'lastUpdated' | 'uploadedBy' | 'versions
 type SortDir = 'asc' | 'desc';
 
 type EncryptedError = { message: string; instructions: string[] };
+
+function isProcessing(status: ContractStatus): boolean {
+  return ['PENDING', 'PROCESSING_TEXT', 'PROCESSING_OCR', 'PROCESSING_AI'].includes(status);
+}
+
+function statusProgress(status: ContractStatus): number {
+  switch (status) {
+    case 'PENDING': return 5;
+    case 'PROCESSING_TEXT': return 25;
+    case 'PROCESSING_OCR': return 45;
+    case 'PROCESSING_AI': return 70;
+    case 'COMPLETE': return 100;
+    default: return 0;
+  }
+}
+
+function friendlyError(msg: string | null): { title: string; detail: string; instructions?: string[] } {
+  const m = msg || '';
+  if (m.includes('PDF_ENCRYPTED') || m.includes('encrypted') || m.includes('copy-protected')) {
+    return {
+      title: 'This PDF is encrypted by the health plan',
+      detail: 'The file is password-protected or copy-locked and cannot be read.',
+      instructions: [
+        'Open the PDF on your computer using Adobe Acrobat or your default PDF viewer.',
+        "Go to File → Print, then choose 'Save as PDF' or 'Microsoft Print to PDF' as the printer.",
+        'Save the new copy to your computer.',
+        'Delete this contract and re-upload the new copy.',
+      ],
+    };
+  }
+  if (m.includes('OCR') || m.includes('ocr') || m.includes('scanned') || m.includes('text quality') || m.includes('unreadable')) {
+    return {
+      title: 'Could not read this scanned document',
+      detail: m,
+      instructions: [
+        'If possible, request a digital (non-scanned) copy of the contract from the payer.',
+        'If only a paper copy is available, re-scan at 300 DPI or higher with a flatbed scanner.',
+        'Make sure the pages are straight, well-lit, and free of shadows or creases.',
+        'Click "Retry" to attempt processing again with enhanced OCR.',
+      ],
+    };
+  }
+  if (m.includes('timeout') || m.includes('Timeout') || m.includes('ETIMEDOUT')) {
+    return {
+      title: 'Processing timed out',
+      detail: 'The AI extraction took too long to complete. This is usually temporary.',
+      instructions: [
+        'Click "Retry" to reprocess — it typically works on the second attempt.',
+        'If it fails again, the contract PDF may be unusually long. Try splitting it into smaller sections.',
+      ],
+    };
+  }
+  if (m.includes('rate') || m.includes('429') || m.includes('Too Many')) {
+    return {
+      title: 'AI service rate limit reached',
+      detail: 'Too many contracts are being processed at once. Your contract will be retried shortly.',
+      instructions: [
+        'Wait a few minutes and click "Retry".',
+        'The processing queue automatically spaces out requests to avoid this.',
+      ],
+    };
+  }
+  if (m.includes('schema') || m.includes('JSON') || m.includes('unexpected')) {
+    return {
+      title: 'AI returned an unexpected response',
+      detail: 'The AI extraction completed but the results could not be parsed correctly.',
+      instructions: [
+        'Click "Retry" — this is usually a one-time issue.',
+        'If it persists, the contract may contain unusual formatting that confuses the AI.',
+      ],
+    };
+  }
+  if (m.includes('FILE_MISSING') || m.includes('no longer available')) {
+    return {
+      title: 'Original PDF file is missing',
+      detail: 'The uploaded PDF can no longer be found on the server.',
+      instructions: [
+        'This can happen if the server storage was cleaned up.',
+        'Delete this contract and re-upload the PDF.',
+      ],
+    };
+  }
+  return {
+    title: 'Processing failed',
+    detail: m || 'An unexpected error occurred during contract processing.',
+    instructions: [
+      'Click "Retry" to attempt processing again.',
+      'If the issue persists, try re-uploading the contract PDF.',
+    ],
+  };
+}
 
 function getLastUpdated(c: ContractRow): string {
   return c.matrix?.extractedAt ?? c.createdAt;
@@ -78,6 +178,10 @@ export function ContractsPage() {
   const [encryptedError, setEncryptedError] = useState<EncryptedError | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Queue UI state
+  const [retrying, setRetrying] = useState<Set<string>>(new Set());
+  const [errorDetailId, setErrorDetailId] = useState<string | null>(null);
+
   const canUpload = user?.role === 'ADMIN' || user?.role === 'CASE_MANAGER';
 
   const reload = () =>
@@ -86,6 +190,54 @@ export function ContractsPage() {
       .finally(() => setLoading(false));
 
   useEffect(() => { reload(); }, []);
+
+  // ── Auto-poll every 3s if any contracts are processing ─────────────────
+  const hasProcessing = contracts.some((c) => isProcessing(c.status));
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (!hasProcessing) {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+      return;
+    }
+    pollingRef.current = setInterval(() => {
+      getContracts()
+        .then((res) => setContracts(res.data.contracts))
+        .catch(() => {});
+    }, 3000);
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
+  }, [hasProcessing]);
+
+  // ── Retry handlers ─────────────────────────────────────────────────────
+  const handleRetry = async (id: string) => {
+    setRetrying((prev) => new Set(prev).add(id));
+    try {
+      await reprocessContract(id);
+      // Optimistic update
+      setContracts((prev) =>
+        prev.map((c) =>
+          c.id === id ? { ...c, status: 'PENDING' as ContractStatus, errorMessage: null } : c
+        )
+      );
+    } catch {
+      // Status stays as ERROR
+    } finally {
+      setRetrying((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  };
+
+  const handleRetryAllForFacility = async (facilityId: string) => {
+    try {
+      await reprocessAllFailed(facilityId);
+      reload();
+    } catch {}
+  };
 
   const openUpload = async () => {
     if (!facilities.length) {
@@ -172,10 +324,23 @@ export function ContractsPage() {
     return sort.dir === 'asc' ? cmp : -cmp;
   });
 
+  // ── Summary counts ─────────────────────────────────────────────────────
+  const summary = {
+    total: contracts.length,
+    complete: contracts.filter((c) => c.status === 'COMPLETE').length,
+    processing: contracts.filter((c) => isProcessing(c.status)).length,
+    errors: contracts.filter((c) => c.status === 'ERROR').length,
+  };
+
+  // Collect unique facility IDs that have errors (for "retry all" per facility)
+  const errorFacilityIds = [...new Set(
+    contracts.filter((c) => c.status === 'ERROR').map((c) => c.facility.id)
+  )];
+
   const SortIndicator = ({ col }: { col: SortCol }) =>
     sort.col !== col
-      ? <span className="ml-1 text-gray-300">↕</span>
-      : <span className="ml-1 text-brand-600">{sort.dir === 'asc' ? '↑' : '↓'}</span>;
+      ? <span className="ml-1 text-gray-300">&#8597;</span>
+      : <span className="ml-1 text-brand-600">{sort.dir === 'asc' ? '\u2191' : '\u2193'}</span>;
 
   const Th = ({ col, children }: { col: SortCol; children: React.ReactNode }) => (
     <th
@@ -201,24 +366,67 @@ export function ContractsPage() {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Contracts</h1>
           <p className="text-gray-500 text-sm mt-1">
-            {contracts.length} contract{contracts.length !== 1 ? 's' : ''} across all facilities
+            {summary.total} contract{summary.total !== 1 ? 's' : ''}
+            {summary.processing > 0 && (
+              <span className="ml-1.5 text-blue-600">
+                &middot; {summary.processing} processing
+              </span>
+            )}
+            {summary.errors > 0 && (
+              <span className="ml-1.5 text-red-600">
+                &middot; {summary.errors} error{summary.errors !== 1 ? 's' : ''}
+              </span>
+            )}
           </p>
         </div>
-        {canUpload && (
-          <button
-            onClick={openUpload}
-            className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-          >
-            + Upload Contract
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {summary.errors > 0 && canUpload && (
+            <div className="relative group">
+              <button
+                onClick={() => {
+                  if (errorFacilityIds.length === 1) {
+                    handleRetryAllForFacility(errorFacilityIds[0]);
+                  }
+                }}
+                className="text-xs font-medium text-red-600 hover:text-red-700 px-3 py-2 rounded-lg border border-red-200 hover:bg-red-50 transition-colors"
+              >
+                Retry All Failed ({summary.errors})
+              </button>
+              {errorFacilityIds.length > 1 && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg py-1 hidden group-hover:block z-10 min-w-[200px]">
+                  {errorFacilityIds.map((fId) => {
+                    const fac = contracts.find((c) => c.facility.id === fId)?.facility;
+                    const count = contracts.filter((c) => c.facility.id === fId && c.status === 'ERROR').length;
+                    return (
+                      <button
+                        key={fId}
+                        onClick={() => handleRetryAllForFacility(fId)}
+                        className="w-full text-left px-4 py-2 text-xs hover:bg-gray-50 text-gray-700"
+                      >
+                        {fac?.name} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+          {canUpload && (
+            <button
+              onClick={openUpload}
+              className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors"
+            >
+              + Upload Contract
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Filter bar */}
       <div className="flex flex-wrap gap-3 mb-5">
         <input
           type="text"
-          placeholder="Search by payer…"
+          placeholder="Search by payer..."
           value={searchPayor}
           onChange={(e) => setSearchPayor(e.target.value)}
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 w-60"
@@ -263,6 +471,7 @@ export function ContractsPage() {
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <Th col="payerName">Payor</Th>
                   <Th col="status">Status</Th>
+                  <th className="text-left px-5 py-3 font-medium text-gray-600 whitespace-nowrap">Progress</th>
                   <Th col="lastUpdated">Last Updated</Th>
                   <Th col="uploadedBy">Uploaded By</Th>
                   <Th col="versions">Versions</Th>
@@ -274,8 +483,18 @@ export function ContractsPage() {
                   const badge = STATUS_BADGE[c.status];
                   const versionKey = `${c.payerName.toLowerCase()}:${c.facility.id}`;
                   const versions = versionMap.get(versionKey) ?? 1;
+                  const pct = statusProgress(c.status);
+                  const processing = isProcessing(c.status);
+                  const isError = c.status === 'ERROR';
+
                   return (
-                    <tr key={c.id} className="hover:bg-gray-50 transition-colors">
+                    <Fragment key={c.id}>
+                    <tr
+                      className={`transition-colors ${
+                        isError ? 'bg-red-50/40 hover:bg-red-50/70' : 'hover:bg-gray-50'
+                      }`}
+                    >
+                      {/* Payor */}
                       <td className="px-5 py-3">
                         <div className="font-medium text-gray-900">{c.payerName}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
@@ -285,21 +504,61 @@ export function ContractsPage() {
                           </Link>
                         </div>
                       </td>
+
+                      {/* Status badge */}
                       <td className="px-5 py-3">
-                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${badge.className}`}>
+                        <span
+                          className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${badge.className} ${
+                            processing ? 'animate-pulse' : ''
+                          }`}
+                        >
+                          {processing && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                          )}
+                          {c.status === 'COMPLETE' && (
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
                           {badge.label}
                         </span>
-                        {c.status === 'ERROR' && c.errorMessage && (
-                          <p className="text-xs text-red-500 mt-1 max-w-[180px] truncate" title={c.errorMessage}>
-                            {c.errorMessage}
-                          </p>
+                        {(c.retryCount ?? 0) > 0 && (
+                          <span className="text-[10px] text-gray-400 ml-1.5">retry #{c.retryCount}</span>
                         )}
                       </td>
+
+                      {/* Progress bar */}
+                      <td className="px-5 py-3 w-32">
+                        {!isError ? (
+                          <div className="w-full bg-gray-200 rounded-full h-1.5">
+                            <div
+                              className={`h-1.5 rounded-full transition-all duration-500 ${
+                                c.status === 'COMPLETE'
+                                  ? 'bg-green-500'
+                                  : c.status === 'PROCESSING_AI'
+                                  ? 'bg-purple-500'
+                                  : 'bg-blue-500'
+                              }`}
+                              style={{ width: `${pct}%` }}
+                            />
+                          </div>
+                        ) : (
+                          <span className="text-xs text-red-400">--</span>
+                        )}
+                      </td>
+
+                      {/* Last updated */}
                       <td className="px-5 py-3 text-gray-500 whitespace-nowrap">
                         {new Date(getLastUpdated(c)).toLocaleDateString()}
                       </td>
-                      <td className="px-5 py-3 text-gray-500">{c.createdBy?.name ?? '—'}</td>
+
+                      {/* Uploaded by */}
+                      <td className="px-5 py-3 text-gray-500">{c.createdBy?.name ?? '\u2014'}</td>
+
+                      {/* Versions */}
                       <td className="px-5 py-3 text-gray-500 text-center">{versions}</td>
+
+                      {/* Actions */}
                       <td className="px-5 py-3">
                         <div className="flex items-center justify-end gap-3">
                           {c.status === 'COMPLETE' && (
@@ -309,6 +568,25 @@ export function ContractsPage() {
                             >
                               View Matrix
                             </Link>
+                          )}
+                          {isError && canUpload && (
+                            <>
+                              <button
+                                onClick={() =>
+                                  setErrorDetailId(errorDetailId === c.id ? null : c.id)
+                                }
+                                className="text-xs text-gray-500 hover:text-gray-700 font-medium"
+                              >
+                                Details
+                              </button>
+                              <button
+                                onClick={() => handleRetry(c.id)}
+                                disabled={retrying.has(c.id)}
+                                className="text-xs text-red-600 hover:text-red-700 font-medium disabled:opacity-50"
+                              >
+                                {retrying.has(c.id) ? 'Retrying...' : 'Retry'}
+                              </button>
+                            </>
                           )}
                           {user?.role === 'ADMIN' && (
                             <button
@@ -321,6 +599,49 @@ export function ContractsPage() {
                         </div>
                       </td>
                     </tr>
+                    {/* Inline error detail row */}
+                    {errorDetailId === c.id && isError && (() => {
+                      const err = friendlyError(c.errorMessage);
+                      return (
+                        <tr>
+                          <td colSpan={7} className="p-0">
+                            <div className="border-t border-red-200 bg-red-50 px-6 py-4">
+                              <div className="flex items-start justify-between">
+                                <div>
+                                  <h4 className="font-semibold text-red-800">{err.title}</h4>
+                                  <p className="text-sm text-red-700 mt-1">{err.detail}</p>
+                                  {err.instructions && err.instructions.length > 0 && (
+                                    <ol className="mt-3 space-y-1 text-sm text-red-700 list-decimal list-inside">
+                                      {err.instructions.map((step, i) => (
+                                        <li key={i}>{step}</li>
+                                      ))}
+                                    </ol>
+                                  )}
+                                </div>
+                                <button
+                                  onClick={() => setErrorDetailId(null)}
+                                  className="text-red-400 hover:text-red-600 p-1"
+                                >
+                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                                  </svg>
+                                </button>
+                              </div>
+                              {canUpload && (
+                                <button
+                                  onClick={() => handleRetry(c.id)}
+                                  disabled={retrying.has(c.id)}
+                                  className="mt-3 bg-red-600 hover:bg-red-700 text-white text-xs font-medium px-4 py-1.5 rounded-lg transition-colors disabled:opacity-50"
+                                >
+                                  {retrying.has(c.id) ? 'Retrying...' : 'Retry Processing'}
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -342,20 +663,20 @@ export function ContractsPage() {
                 onClick={() => setShowUpload(false)}
                 className="text-gray-400 hover:text-gray-600 text-xl leading-none"
               >
-                ✕
+                &#10005;
               </button>
             </div>
 
             <div className="p-6 space-y-4">
               <div className="bg-blue-50 border border-blue-200 rounded-lg px-4 py-3 text-sm text-blue-700">
                 <strong>Note:</strong> If your PDF was sent by a health plan it may be encrypted.
-                If upload fails, go to <strong>File → Print → Save as PDF</strong> and upload that copy.
+                If upload fails, go to <strong>File &rarr; Print &rarr; Save as PDF</strong> and upload that copy.
               </div>
 
               {encryptedError && (
                 <div className="bg-amber-50 border border-amber-300 rounded-lg p-4">
                   <div className="flex items-start gap-2">
-                    <span className="text-amber-500 text-lg leading-none">⚠</span>
+                    <span className="text-amber-500 text-lg leading-none">&#9888;</span>
                     <div>
                       <p className="font-semibold text-amber-800 text-sm">PDF is encrypted</p>
                       <ol className="mt-2 space-y-1 text-sm text-amber-700 list-decimal list-inside">
@@ -385,7 +706,7 @@ export function ContractsPage() {
                         onClick={() => setShowUpload(false)}
                         className="mt-2 inline-block text-sm font-medium text-brand-600 hover:text-brand-700"
                       >
-                        Go to Facilities to add one →
+                        Go to Facilities to add one &rarr;
                       </Link>
                     </div>
                   ) : (
@@ -395,7 +716,7 @@ export function ContractsPage() {
                       onChange={(e) => setUploadFacilityId(e.target.value)}
                       className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
                     >
-                      <option value="">Select facility…</option>
+                      <option value="">Select facility...</option>
                       {facilities.map((f) => (
                         <option key={f.id} value={f.id}>{f.name}</option>
                       ))}
@@ -427,7 +748,7 @@ export function ContractsPage() {
                     onChange={(e) => setPayerType(e.target.value)}
                     className="w-full border border-gray-300 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
                   >
-                    <option value="">Select payer type…</option>
+                    <option value="">Select payer type...</option>
                     {PAYER_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                   </select>
                 </div>
@@ -482,7 +803,7 @@ export function ContractsPage() {
                     disabled={uploading || !file}
                     className="bg-brand-600 hover:bg-brand-700 text-white text-sm font-medium px-6 py-2.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {uploading ? 'Uploading…' : 'Upload & Process'}
+                    {uploading ? 'Uploading...' : 'Upload & Process'}
                   </button>
                   <button
                     type="button"

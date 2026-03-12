@@ -37,11 +37,51 @@ export interface Contract {
   payerType: string;
   effectiveDate: string | null;
   expirationDate: string | null;
+  originalFilename: string;
   status: ContractStatus;
   errorMessage: string | null;
+  retryCount: number;
   createdAt: string;
   createdBy: string;
   facility?: { id: string; name: string };
+  queuePosition?: number;
+}
+
+// ── Batch upload types ───────────────────────────────────────────────────────
+
+export interface BatchUploadResult {
+  contractId: string;
+  filename: string;
+  payerName: string;
+  status: string;
+  queuePosition: number;
+  error?: string;
+}
+
+export interface BatchUploadResponse {
+  uploaded: number;
+  failed: number;
+  total: number;
+  contracts: BatchUploadResult[];
+}
+
+export interface QueueStatus {
+  queue: {
+    processing: number;
+    waiting: number;
+    concurrency: number;
+    queuedIds: string[];
+  };
+  user: {
+    inFlight: number;
+    remaining: number;
+    limit: number;
+  };
+  limits: {
+    maxBatchFiles: number;
+    maxBatchMB: number;
+    maxFileMB: number;
+  };
 }
 
 // ── Matrix types ──────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import { LoginPage } from './pages/LoginPage';
 import { FacilitiesPage } from './pages/FacilitiesPage';
 import { FacilityDetailPage } from './pages/FacilityDetailPage';
 import { UploadContractPage } from './pages/UploadContractPage';
+import { BatchUploadPage } from './pages/BatchUploadPage';
 import { MatrixPage } from './pages/MatrixPage';
 import { AdminPage } from './pages/AdminPage';
 import { ContractsPage } from './pages/ContractsPage';
@@ -76,6 +77,14 @@ export default function App() {
                 element={
                   <AppLayout>
                     <UploadContractPage />
+                  </AppLayout>
+                }
+              />
+              <Route
+                path="/facilities/:facilityId/contracts/batch-upload"
+                element={
+                  <AppLayout>
+                    <BatchUploadPage />
                   </AppLayout>
                 }
               />
