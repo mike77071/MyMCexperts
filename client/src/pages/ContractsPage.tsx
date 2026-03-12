@@ -7,6 +7,7 @@ import {
   uploadContract,
   reprocessContract,
   reprocessAllFailed,
+  getExportUrl,
 } from '../services/api';
 import { ContractStatus, Facility } from '../types';
 import { useAuth } from '../hooks/useAuth';
@@ -47,7 +48,7 @@ const STATUS_LABELS: [ContractStatus, string][] = [
 
 const PAYER_TYPES = ['Medicare Advantage', 'Medicaid MCO', 'Commercial', 'Workers Comp', 'Auto', 'Other'];
 
-type SortCol = 'payerName' | 'status' | 'lastUpdated' | 'uploadedBy' | 'versions';
+type SortCol = 'payerName' | 'facility' | 'status' | 'lastUpdated' | 'uploadedBy' | 'versions' | 'expirationDate';
 type SortDir = 'asc' | 'desc';
 
 type EncryptedError = { message: string; instructions: string[] };
@@ -162,6 +163,7 @@ export function ContractsPage() {
   const [loading, setLoading] = useState(true);
   const [searchPayor, setSearchPayor] = useState('');
   const [filterStatus, setFilterStatus] = useState('');
+  const [filterFacility, setFilterFacility] = useState('');
   const [sort, setSort] = useState<{ col: SortCol; dir: SortDir }>({ col: 'lastUpdated', dir: 'desc' });
 
   // Upload modal state
@@ -303,6 +305,7 @@ export function ContractsPage() {
   const filtered = contracts.filter((c) => {
     if (searchPayor && !c.payerName.toLowerCase().includes(searchPayor.toLowerCase())) return false;
     if (filterStatus && c.status !== filterStatus) return false;
+    if (filterFacility && c.facility.id !== filterFacility) return false;
     return true;
   });
 
@@ -310,10 +313,16 @@ export function ContractsPage() {
     let cmp = 0;
     if (sort.col === 'payerName') {
       cmp = a.payerName.localeCompare(b.payerName);
+    } else if (sort.col === 'facility') {
+      cmp = a.facility.name.localeCompare(b.facility.name);
     } else if (sort.col === 'status') {
       cmp = a.status.localeCompare(b.status);
     } else if (sort.col === 'lastUpdated') {
       cmp = new Date(getLastUpdated(a)).getTime() - new Date(getLastUpdated(b)).getTime();
+    } else if (sort.col === 'expirationDate') {
+      const da = a.expirationDate ? new Date(a.expirationDate).getTime() : 0;
+      const db = b.expirationDate ? new Date(b.expirationDate).getTime() : 0;
+      cmp = da - db;
     } else if (sort.col === 'uploadedBy') {
       cmp = (a.createdBy?.name ?? '').localeCompare(b.createdBy?.name ?? '');
     } else if (sort.col === 'versions') {
@@ -432,6 +441,18 @@ export function ContractsPage() {
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 w-60"
         />
         <select
+          value={filterFacility}
+          onChange={(e) => setFilterFacility(e.target.value)}
+          className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
+        >
+          <option value="">All Facilities</option>
+          {[...new Map(contracts.map((c) => [c.facility.id, c.facility.name])).entries()].map(
+            ([id, name]) => (
+              <option key={id} value={id}>{name}</option>
+            )
+          )}
+        </select>
+        <select
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white"
@@ -441,15 +462,22 @@ export function ContractsPage() {
             <option key={val} value={val}>{label}</option>
           ))}
         </select>
-        {(searchPayor || filterStatus) && (
+        {(searchPayor || filterStatus || filterFacility) && (
           <button
-            onClick={() => { setSearchPayor(''); setFilterStatus(''); }}
+            onClick={() => { setSearchPayor(''); setFilterStatus(''); setFilterFacility(''); }}
             className="text-sm text-gray-500 hover:text-gray-700"
           >
             Clear filters
           </button>
         )}
       </div>
+
+      {/* Result count */}
+      {(searchPayor || filterStatus || filterFacility) && sorted.length > 0 && (
+        <p className="text-xs text-gray-400 mb-3">
+          Showing {sorted.length} of {contracts.length} contract{contracts.length !== 1 ? 's' : ''}
+        </p>
+      )}
 
       {/* Table */}
       {sorted.length === 0 ? (
@@ -470,11 +498,13 @@ export function ContractsPage() {
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
                   <Th col="payerName">Payor</Th>
+                  <Th col="facility">Facility</Th>
                   <Th col="status">Status</Th>
                   <th className="text-left px-5 py-3 font-medium text-gray-600 whitespace-nowrap">Progress</th>
-                  <Th col="lastUpdated">Last Updated</Th>
+                  <Th col="expirationDate">Expires</Th>
+                  <Th col="lastUpdated">Updated</Th>
                   <Th col="uploadedBy">Uploaded By</Th>
-                  <Th col="versions">Versions</Th>
+                  <Th col="versions">Ver.</Th>
                   <th className="px-5 py-3 font-medium text-gray-600 text-right whitespace-nowrap">Actions</th>
                 </tr>
               </thead>
@@ -498,11 +528,18 @@ export function ContractsPage() {
                       <td className="px-5 py-3">
                         <div className="font-medium text-gray-900">{c.payerName}</div>
                         <div className="text-xs text-gray-400 mt-0.5">
-                          {c.payerType} &middot;{' '}
-                          <Link to={`/facilities/${c.facility.id}`} className="hover:text-brand-600">
-                            {c.facility.name}
-                          </Link>
+                          {c.payerType}
+                          {c.originalFilename && (
+                            <span> &middot; {c.originalFilename}</span>
+                          )}
                         </div>
+                      </td>
+
+                      {/* Facility */}
+                      <td className="px-5 py-3">
+                        <Link to={`/facilities/${c.facility.id}`} className="text-gray-700 hover:text-brand-600 text-sm">
+                          {c.facility.name}
+                        </Link>
                       </td>
 
                       {/* Status badge */}
@@ -547,6 +584,30 @@ export function ContractsPage() {
                         )}
                       </td>
 
+                      {/* Expiration date */}
+                      <td className="px-5 py-3 whitespace-nowrap">
+                        {c.expirationDate ? (() => {
+                          const exp = new Date(c.expirationDate);
+                          const now = new Date();
+                          const daysLeft = Math.ceil((exp.getTime() - now.getTime()) / 86400000);
+                          const isExpired = daysLeft < 0;
+                          const isExpiringSoon = !isExpired && daysLeft <= 30;
+                          return (
+                            <span className={
+                              isExpired ? 'text-red-600 font-medium' :
+                              isExpiringSoon ? 'text-amber-600 font-medium' :
+                              'text-gray-500'
+                            }>
+                              {exp.toLocaleDateString()}
+                              {isExpired && <span className="block text-[10px]">Expired</span>}
+                              {isExpiringSoon && <span className="block text-[10px]">{daysLeft}d left</span>}
+                            </span>
+                          );
+                        })() : (
+                          <span className="text-gray-300">—</span>
+                        )}
+                      </td>
+
                       {/* Last updated */}
                       <td className="px-5 py-3 text-gray-500 whitespace-nowrap">
                         {new Date(getLastUpdated(c)).toLocaleDateString()}
@@ -562,12 +623,21 @@ export function ContractsPage() {
                       <td className="px-5 py-3">
                         <div className="flex items-center justify-end gap-3">
                           {c.status === 'COMPLETE' && (
-                            <Link
-                              to={`/contracts/${c.id}/matrix`}
-                              className="text-xs text-brand-600 hover:text-brand-700 font-medium whitespace-nowrap"
-                            >
-                              View Matrix
-                            </Link>
+                            <>
+                              <Link
+                                to={`/contracts/${c.id}/matrix`}
+                                className="text-xs text-brand-600 hover:text-brand-700 font-medium whitespace-nowrap"
+                              >
+                                View Matrix
+                              </Link>
+                              <a
+                                href={getExportUrl(c.id)}
+                                className="text-xs text-gray-500 hover:text-gray-700 font-medium whitespace-nowrap"
+                                title="Download Excel"
+                              >
+                                Export
+                              </a>
+                            </>
                           )}
                           {isError && canUpload && (
                             <>
@@ -604,7 +674,7 @@ export function ContractsPage() {
                       const err = friendlyError(c.errorMessage);
                       return (
                         <tr>
-                          <td colSpan={7} className="p-0">
+                          <td colSpan={9} className="p-0">
                             <div className="border-t border-red-200 bg-red-50 px-6 py-4">
                               <div className="flex items-start justify-between">
                                 <div>
